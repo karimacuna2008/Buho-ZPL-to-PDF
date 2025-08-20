@@ -166,7 +166,7 @@ with st.sidebar:
     height_in = st.number_input("Alto (pulgadas)",  min_value=0.5, max_value=15.0, value=6.0, step=0.1, format="%.2f")
     dpi       = st.selectbox("Resolución (DPI)", [203, 300, 600], index=0)
     st.divider()
-    st.caption("En caso de que el tamaño en el PDF no coincida, modificar el valor. Un valor de resolución mayor genera una imagen mas pequeña.")
+    st.caption("En caso de que el tamaño en el PDF no coincida, modificar el valor. \nUn valor de resolución mayor genera una imagen mas pequeña.")
     st.divider()
     st.caption("La API limita a **50 etiquetas** por request (incluye duplicados por ^PQ).")
 
