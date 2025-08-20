@@ -158,7 +158,6 @@ def build_requests_from_blocks(blocks: List[str]) -> List[List[str]]:
 
 # ---------- UI ----------
 st.title("📦 .TXT(ZPL) ➜ PDF")
-st.caption("Evita el 413 agrupando por ≤50 etiquetas por request (cuenta ^PQ).")
 
 with st.sidebar:
     st.header("⚙️ Parámetros")
