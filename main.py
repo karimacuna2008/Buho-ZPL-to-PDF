@@ -8,17 +8,18 @@ import time
 import random
 import requests
 import streamlit as st
-from typing import List, Optional
-from pypdf import PdfReader, PdfWriter  # <- funciona en pypdf >=3 y >=6
+from typing import List, Optional, Tuple, Dict, Any
+from pypdf import PdfReader, PdfWriter  # pypdf >=3
 
-# ============== Config de página ==============
-st.set_page_config(page_title="ZPL ➜ PDF", page_icon="📦", layout="centered")
+st.set_page_config(page_title="ZPL ➜ PDF unificado (Labelary)", page_icon="📦", layout="centered")
 
-# ============== Constantes ==============
 LABELARY_URL = "https://api.labelary.com/v1/printers/{dpmm}dpmm/labels/{w}x{h}/"
 
-# ============== Utilidades ZPL ==============
+# ---------- Regex ----------
 RE_BLOCKS = re.compile(r"(\^XA.*?\^XZ)", flags=re.DOTALL | re.IGNORECASE)
+RE_PQ     = re.compile(r"\^PQ\s*([0-9]+)", flags=re.IGNORECASE)
+RE_JSON_ID = re.compile(r'"id"\s*:\s*"([^"]+)"')
+RE_FD     = re.compile(r"\^FD(.*?)\^FS", re.DOTALL | re.IGNORECASE)
 
 def zpl_split_blocks(zpl_text: str) -> List[str]:
     t = zpl_text.replace("\r\n", "\n").replace("\r", "\n")
@@ -28,7 +29,36 @@ def zpl_split_blocks(zpl_text: str) -> List[str]:
 def dpmm_from_dpi(dpi: int) -> int:
     return 24 if dpi >= 600 else 12 if dpi >= 300 else 8  # 203->8
 
-# ============== Cliente Labelary ==============
+def parse_pq(block: str) -> int:
+    """Devuelve el número de copias (PQ). Si no hay ^PQ, es 1."""
+    m = RE_PQ.search(block)
+    try:
+        return int(m.group(1)) if m else 1
+    except Exception:
+        return 1
+
+def set_pq(block: str, new_pq: int) -> str:
+    """Fuerza ^PQ a new_pq. Si existe, lo reemplaza; si no, lo inserta antes de ^XZ."""
+    if RE_PQ.search(block):
+        return RE_PQ.sub(f"^PQ{new_pq}", block, count=1)
+    # Insertar antes del último ^XZ
+    return re.sub(r"\^XZ\s*$", f"^PQ{new_pq}\n^XZ", block, flags=re.IGNORECASE)
+
+def describe_block(block: str, idx: int, pq: int) -> str:
+    """Extrae algo legible para log: id del QR o primer FD."""
+    ident = None
+    m = RE_JSON_ID.search(block)
+    if m:
+        ident = m.group(1)
+    else:
+        fd = RE_FD.search(block)
+        if fd:
+            txt = re.sub(r"\s+", " ", fd.group(1)).strip()
+            ident = (txt[:60] + "…") if len(txt) > 60 else txt
+    base = f"#{idx+1} (PQ={pq})"
+    return f"{base} — {ident}" if ident else base
+
+# ---------- Llamada a Labelary ----------
 def call_labelary_pdf(
     blocks: List[str],
     width_in: float,
@@ -37,43 +67,41 @@ def call_labelary_pdf(
     timeout: int = 30,
     max_retries: int = 5,
     rate_delay_s: float = 0.5,
-) -> Optional[bytes]:
-    """Devuelve un PDF (bytes) para uno o varios bloques ZPL."""
+) -> Tuple[Optional[bytes], Optional[str], Optional[int]]:
+    """
+    Devuelve (pdf_bytes, error_text, http_code).
+    """
     dpmm = dpmm_from_dpi(dpi)
     url = LABELARY_URL.format(dpmm=dpmm, w=width_in, h=height_in)
     headers = {"Accept": "application/pdf"}
     body = "\n".join(blocks).encode("utf-8")
 
-    time.sleep(rate_delay_s)  # respeta cadencia
+    time.sleep(rate_delay_s)
 
     for attempt in range(1, max_retries + 1):
         try:
             resp = requests.post(url, headers=headers, data=body, timeout=timeout)
             if resp.status_code == 200:
-                return resp.content
+                return resp.content, None, None
 
             code = resp.status_code
             text = (resp.text or "").strip()
-            st.write(f"**HTTP {code}**: {text[:300]}{'…' if len(text) > 300 else ''}")
-
             if code == 429 or 500 <= code < 600:
                 backoff = min(60, (2 ** (attempt - 1))) + random.uniform(0, 0.5 * attempt)
-                st.write(f"Reintentando en **{backoff:.1f} s** … (intento {attempt}/{max_retries})")
+                st.write(f"HTTP {code}. Reintentando en **{backoff:.1f}s** (intento {attempt}/{max_retries})…")
                 time.sleep(backoff)
                 continue
-            return None  # 4xx duros (400/404/413)
+            return None, text, code  # 4xx/otros: devolvemos error “duro”
 
         except requests.RequestException as e:
-            st.write(f"**Error de red**: {e}")
             backoff = min(60, (2 ** (attempt - 1))) + random.uniform(0, 0.5 * attempt)
-            st.write(f"Reintentando en **{backoff:.1f} s** … (intento {attempt}/{max_retries})")
+            st.write(f"Error de red: {e}. Reintentando en **{backoff:.1f}s** (intento {attempt}/{max_retries})…")
             time.sleep(backoff)
 
-    return None
+    return None, "Max retries exceeded", -1
 
-# ============== Unir PDFs (pypdf >=3/6) ==============
+# ---------- Unir PDFs ----------
 def merge_pdf_bytes(chunks: List[bytes]) -> io.BytesIO:
-    """Une una lista de PDFs (bytes) en un único PDF y devuelve un buffer listo para descargar."""
     writer = PdfWriter()
     for blob in chunks:
         reader = PdfReader(io.BytesIO(blob))
@@ -84,41 +112,69 @@ def merge_pdf_bytes(chunks: List[bytes]) -> io.BytesIO:
     out.seek(0)
     return out
 
-# ============== UI ==============
-st.title("📦 ZPL ➜ PDF")
-st.caption("Sube un .txt con bloques ^XA…^XZ, elige tamaño y DPI, y descarga un solo PDF.")
+# ---------- Lógica de empaquetado respetando el límite 50 ----------
+def build_requests_from_blocks(blocks: List[str]) -> List[List[str]]:
+    """
+    Crea una lista de “requests”, cada request es una lista de bloques ZPL.
+    - Respeta el límite de **50 etiquetas reales** (sumando ^PQ de cada bloque).
+    - Si un bloque tiene ^PQ > 50, lo parte en varios sub-bloques con ^PQ ajustado.
+    """
+    reqs: List[List[str]] = []
+    current: List[str] = []
+    current_count = 0  # etiquetas reales del request actual
+
+    for b in blocks:
+        pq = parse_pq(b)
+        if pq <= 50:
+            # ¿cabe entero?
+            if current_count + pq <= 50:
+                current.append(b)
+                current_count += pq
+            else:
+                # cerrar actual y abrir nuevo
+                if current:
+                    reqs.append(current)
+                current = [b]
+                current_count = pq
+        else:
+            # partir en trozos de 50
+            remaining = pq
+            while remaining > 0:
+                take = min(50, remaining)
+                b_piece = set_pq(b, take)
+                if current_count + take <= 50 and current:
+                    current.append(b_piece)
+                    current_count += take
+                else:
+                    if current:
+                        reqs.append(current)
+                    current = [b_piece]
+                    current_count = take
+                remaining -= take
+
+    if current:
+        reqs.append(current)
+    return reqs
+
+# ---------- UI ----------
+st.title("📦 ZPL ➜ PDF unificado (Labelary)")
+st.caption("Evita el 413 agrupando por ≤50 etiquetas por request (cuenta ^PQ).")
 
 with st.sidebar:
     st.header("⚙️ Parámetros")
-    width_in  = st.number_input(
-        "Ancho (pulgadas)",
-        min_value=0.5,
-        max_value=15.0,
-        value=4.0,
-        step=0.1,
-        format="%.2f"
-    )
-    height_in = st.number_input(
-        "Alto (pulgadas)",
-        min_value=0.5,
-        max_value=15.0,
-        value=6.0,
-        step=0.1,
-        format="%.2f"
-    )
-    dpi = st.selectbox("Resolución (DPI)", [203, 300, 600], index=0)
-    st.caption("Tip: muchas guías 4×6 son 203 dpi (8 dpmm). Máx. 50 etiquetas por request.")
+    width_in  = st.number_input("Ancho (pulgadas)", min_value=0.5, max_value=15.0, value=4.0, step=0.1, format="%.2f")
+    height_in = st.number_input("Alto (pulgadas)",  min_value=0.5, max_value=15.0, value=6.0, step=0.1, format="%.2f")
+    dpi       = st.selectbox("Resolución (DPI)", [203, 300, 600], index=0)
+    st.caption("La API limita a **50 etiquetas** por request (incluye duplicados por ^PQ).")
 
-# ===== valores fijos =====
-CHUNK_START = 10          # tamaño inicial del grupo
-TIMEOUT_S   = 30          # timeout HTTP en segundos
-RPS         = 2.0         # requests por segundo
-
+# Valores fijos (los escondemos de la UI)
+CHUNK_RPS   = 2.0     # req/seg
+TIMEOUT_S   = 30
+RATE_DELAY  = 1.0 / CHUNK_RPS
 
 uploaded = st.file_uploader("Sube tu archivo .txt con ZPL", type=["txt"])
 go = st.button("🚀 Convertir y unir en un solo PDF", disabled=(uploaded is None))
 
-# ============== Lógica principal ==============
 if go and uploaded is not None:
     try:
         text = uploaded.read().decode("utf-8", errors="ignore")
@@ -126,74 +182,77 @@ if go and uploaded is not None:
         if not blocks:
             st.error("No se detectaron bloques ^XA…^XZ.")
         else:
-            total = len(blocks)
-            st.info(f"**Total de etiquetas detectadas:** {total}")
+            # Datos de bloques para log
+            block_infos = [(i, parse_pq(b), describe_block(b, i, parse_pq(b))) for i, b in enumerate(blocks)]
+            total_etiquetas = sum(pq for _, pq, _ in block_infos)
+            st.info(f"Detectados **{len(blocks)}** bloques, **{total_etiquetas}** etiqueta(s) reales considerando ^PQ.")
+
+            # Construir requests seguros
+            requests_list = build_requests_from_blocks(blocks)
+            st.write(f"Se generarán **{len(requests_list)}** request(s) (máx 50 etiquetas cada uno).")
 
             prog = st.progress(0)
-            log_box = st.empty()
+            merged: List[bytes] = []
+            failed: List[Dict[str, Any]] = []
 
-            merged_chunks: List[bytes] = []
-            idx = 0
-            group_id = 1
-            chunk_size = int(CHUNK_START)
-            rate_delay = max(0.0, 1.0 / float(RPS)) if RPS > 0 else 0.0
+            for gi, req_blocks in enumerate(requests_list, start=1):
+                # calcular conteo real del grupo
+                pq_sum = sum(parse_pq(b) for b in req_blocks)
+                st.write(f"➡️ **Grupo #{gi}** — {len(req_blocks)} bloque(s), **{pq_sum}** etiqueta(s)")
 
-            # número de grupos estimado (cambia si reducimos chunk_size)
-            estimated_groups = math.ceil(total / max(1, chunk_size))
-            finished_groups = 0
-
-            while idx < total:
-                group = blocks[idx: idx + chunk_size]
-                log_box.write(f"➡️ **Grupo #{group_id}** — {len(group)} etiqueta(s) · "
-                              f"{width_in}×{height_in} in @ {dpi} dpi")
-
-                pdf_bytes = call_labelary_pdf(
-                    group,
-                    width_in=width_in,
-                    height_in=height_in,
-                    dpi=dpi,
-                    timeout=TIMEOUT_S,
-                    rate_delay_s=rate_delay
+                pdf_bytes, err_txt, err_code = call_labelary_pdf(
+                    req_blocks, width_in=width_in, height_in=height_in, dpi=dpi,
+                    timeout=TIMEOUT_S, rate_delay_s=RATE_DELAY
                 )
 
                 if pdf_bytes:
-                    merged_chunks.append(pdf_bytes)
-                    finished_groups += 1
-                    # progreso (basado en grupos completados)
-                    frac = min(1.0, finished_groups / max(estimated_groups, 1))
-                    prog.progress(frac)
-                    st.success(f"✔ Grupo #{group_id} listo")
-                    idx += chunk_size
-                    group_id += 1
-                    continue
+                    merged.append(pdf_bytes)
+                    st.success(f"✔ Grupo #{gi} listo")
+                else:
+                    st.error(f"✗ Grupo #{gi} falló (HTTP {err_code}). {err_txt[:200] if err_txt else ''}")
+                    # Loggear los bloques del grupo
+                    for b in req_blocks:
+                        idx = blocks.index(b) if b in blocks else -1
+                        pq = parse_pq(b)
+                        failed.append({
+                            "index": idx+1 if idx >= 0 else None,
+                            "pq": pq,
+                            "desc": describe_block(b, idx if idx>=0 else 0, pq),
+                            "group": gi,
+                            "http": err_code,
+                            "err": (err_txt or "")[:500]
+                        })
 
-                if chunk_size > 1:
-                    chunk_size = max(1, chunk_size // 2)
-                    estimated_groups = math.ceil((total - idx) / chunk_size) + (finished_groups)
-                    st.warning(f"⚠️ Falló el grupo. Reduciendo chunk_size a **{chunk_size}** y reintentando…")
-                    continue
+                prog.progress(gi / max(1, len(requests_list)))
 
-                st.error(f"✗ Falló la etiqueta individual #{idx+1}. Se omitirá.")
-                idx += 1  # salta etiqueta problemática
+            if not merged:
+                st.error("No se pudo generar ningún PDF.")
+                if failed:
+                    with st.expander("Ver fallos"):
+                        for f in failed:
+                            st.write(f"- Bloque {f['desc']} | Grupo {f['group']} | HTTP {f['http']} | {f['err']}")
+                st.stop()
 
-            # Unir todo en un solo PDF
-            final_buf = merge_pdf_bytes(merged_chunks)
+            final_buf = merge_pdf_bytes(merged)
             st.success("🏁 Proceso terminado. PDF unificado listo.")
             st.download_button(
                 label="⬇️ Descargar PDF unificado",
                 data=final_buf,
-                file_name="Etiquetas.pdf",
+                file_name="labels_unificado.pdf",
                 mime="application/pdf"
             )
+
+            # Reporte de fallos detallado (si hubo)
+            if failed:
+                st.warning(f"Algunos bloques fallaron: {len(failed)}")
+                with st.expander("🔎 Detalle de bloques fallidos"):
+                    for f in failed:
+                        st.write(f"- Bloque {f['desc']} | Grupo {f['group']} | HTTP {f['http']} | {f['err']}")
+
+            # Resumen por bloque (opcional)
+            with st.expander("📋 Resumen por bloque (PQ e identificador)"):
+                for i, pq, desc in block_infos:
+                    st.write(f"- {desc}")
+
     except Exception as e:
         st.exception(e)
-
-# with st.expander("ℹ️ Consejos"):
-#     st.markdown(
-#         """
-# - Si tus coordenadas ZPL son ~812×1218 dots, eso es **4×6 in a 203 dpi** (elige 203).
-# - Si aparece **HTTP 400/413**, el grupo es muy grande o hay ZPL inválido: el app reduce automáticamente el **chunk_size**.
-# - **HTTP 429/5xx**: se reintenta con *backoff*.
-# - Labelary devuelve un PDF por request; aquí se **unen** en uno solo con `pypdf`.
-#         """
-#     )
