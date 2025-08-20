@@ -85,7 +85,7 @@ def merge_pdf_bytes(chunks: List[bytes]) -> io.BytesIO:
     return out
 
 # ============== UI ==============
-st.title("📦 ZPL ➜ PDF unificado (Labelary)")
+st.title("📦 ZPL ➜ PDF")
 st.caption("Sube un .txt con bloques ^XA…^XZ, elige tamaño y DPI, y descarga un solo PDF.")
 
 with st.sidebar:
@@ -182,7 +182,7 @@ if go and uploaded is not None:
             st.download_button(
                 label="⬇️ Descargar PDF unificado",
                 data=final_buf,
-                file_name="labels_unificado.pdf",
+                file_name="Etiquetas.pdf",
                 mime="application/pdf"
             )
     except Exception as e:
