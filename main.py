@@ -157,7 +157,7 @@ def build_requests_from_blocks(blocks: List[str]) -> List[List[str]]:
     return reqs
 
 # ---------- UI ----------
-st.title("📦 ZPL ➜ PDF unificado (Labelary)")
+st.title("📦 ZPL ➜ PDF")
 st.caption("Evita el 413 agrupando por ≤50 etiquetas por request (cuenta ^PQ).")
 
 with st.sidebar:
@@ -238,7 +238,7 @@ if go and uploaded is not None:
             st.download_button(
                 label="⬇️ Descargar PDF unificado",
                 data=final_buf,
-                file_name="labels_unificado.pdf",
+                file_name="Etiquetas.pdf",
                 mime="application/pdf"
             )
 
