@@ -11,7 +11,7 @@ import streamlit as st
 from typing import List, Optional, Tuple, Dict, Any
 from pypdf import PdfReader, PdfWriter  # pypdf >=3
 
-st.set_page_config(page_title="ZPL ➜ PDF unificado (Labelary)", page_icon="📦", layout="centered")
+st.set_page_config(page_title=".TXT(ZPL) ➜ PDF", page_icon="📦", layout="centered")
 
 LABELARY_URL = "https://api.labelary.com/v1/printers/{dpmm}dpmm/labels/{w}x{h}/"
 
@@ -157,7 +157,7 @@ def build_requests_from_blocks(blocks: List[str]) -> List[List[str]]:
     return reqs
 
 # ---------- UI ----------
-st.title("📦 ZPL ➜ PDF")
+st.title("📦 .TXT(ZPL) ➜ PDF")
 st.caption("Evita el 413 agrupando por ≤50 etiquetas por request (cuenta ^PQ).")
 
 with st.sidebar:
